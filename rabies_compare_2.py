@@ -1899,6 +1899,201 @@ def plot_john_regional_inputs_bar_chart(df: pd.DataFrame, normalize_by_area=Fals
     plt.close(fig)
 
 # -----------------
+# Convergence Index Analysis
+# -----------------
+
+def compute_convergence_index(df_orig: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate convergence index per animal: (V2M + V2L + dLGN) / starter_cells
+    
+    Args:
+        df_orig: Original wide-format dataframe
+        
+    Returns:
+        DataFrame with Animal ID, Injection Scheme, and Convergence_Index
+    """
+    convergence_data = []
+    
+    for _, row in df_orig.iterrows():
+        animal_id = row['Animal ID']
+        injection_scheme = row['Injection Scheme']
+        starter_cells = row['V1 Starters']
+        
+        # Sum input cells from V2M, V2L, and dLGN
+        total_input_cells = row['V2M'] + row['V2L'] + row['dLGN']
+        
+        # Calculate convergence index
+        if starter_cells > 0:
+            convergence_index = total_input_cells / starter_cells
+        else:
+            convergence_index = 0  # Handle edge case of zero starter cells
+            
+        convergence_data.append({
+            'Animal ID': animal_id,
+            'Injection Scheme': injection_scheme,
+            'Convergence_Index': convergence_index,
+            'Total_Input_Cells': total_input_cells,
+            'Starter_Cells': starter_cells
+        })
+    
+    return pd.DataFrame(convergence_data)
+
+def run_convergence_tests(df: pd.DataFrame, conds: List[str]) -> pd.DataFrame:
+    """
+    Run statistical tests for convergence index between conditions
+    
+    Args:
+        df: DataFrame with convergence index data
+        conds: List of two conditions to compare
+        
+    Returns:
+        DataFrame with test results
+    """
+    results: List[TestResult] = []
+    
+    # Get data for each condition
+    x = df.loc[df["Injection Scheme"] == conds[0], "Convergence_Index"]
+    y = df.loc[df["Injection Scheme"] == conds[1], "Convergence_Index"]
+    
+    n1, n2 = x.notna().sum(), y.notna().sum()
+    if n1 < 2 or n2 < 2:
+        return pd.DataFrame()
+    
+    # Check normality
+    norm1, _ = check_normality(x)
+    norm2, _ = check_normality(y)
+    
+    # Check variance equality
+    try:
+        lev_stat, lev_p = stats.levene(x.dropna(), y.dropna())
+    except Exception:
+        lev_p = np.nan
+    
+    # Calculate power analysis
+    power_results = calculate_power_analysis(x, y)
+    
+    # Choose appropriate test
+    if norm1 and norm2:
+        equal_var = (lev_p >= 0.05) if not np.isnan(lev_p) else True
+        t_stat, p = stats.ttest_ind(x, y, equal_var=equal_var)
+        test_name = "Student's t-test" if equal_var else "Welch's t-test"
+        effect_size = (x.mean() - y.mean()) / np.sqrt((x.var() + y.var()) / 2)
+    else:
+        try:
+            u_stat, p = stats.mannwhitneyu(x, y, alternative="two-sided")
+            test_name = "Mann-Whitney U"
+            # Calculate effect size for Mann-Whitney U
+            n_total = n1 + n2
+            z_score = stats.norm.ppf(1 - p/2) if p < 1 else 0
+            effect_size = z_score / np.sqrt(n_total)
+        except Exception:
+            p = np.nan
+            test_name = "Mann-Whitney U (failed)"
+            effect_size = np.nan
+    
+    # Create result
+    result = TestResult(
+        stratum_type="Convergence_Index",
+        stratum="Convergence_Index",
+        n1=n1,
+        n2=n2,
+        normal1=norm1,
+        normal2=norm2,
+        levene_p=lev_p,
+        test=test_name,
+        stat=effect_size,  # Using effect size as the statistic
+        p=p,
+        effect=effect_size,
+        observed_power=power_results['observed_power'],
+        required_n_per_group_80=power_results['required_n_per_group_80'],
+        required_n_per_group_90=power_results['required_n_per_group_90'],
+        effect_size_cohens_d=power_results['effect_size_cohens_d'],
+        effect_size_hedges_g=power_results['effect_size_hedges_g'],
+        mean_diff=power_results['mean_diff'],
+        pooled_std=power_results['pooled_std']
+    )
+    results.append(result)
+    
+    return pd.DataFrame([result.__dict__ for result in results])
+
+def plot_convergence_index(df: pd.DataFrame, stats_df: pd.DataFrame, savepath: str | None = None):
+    """
+    Plot convergence index as box plots with mean and SEM
+    
+    Args:
+        df: DataFrame with convergence index data
+        stats_df: Statistics dataframe
+        savepath: Path to save the plot
+    """
+    fig, ax = plt.subplots(1, 1, figsize=FIGSIZE, dpi=PLOT_DPI)
+    
+    # Get p-value and test name from stats
+    p_val = stats_df['p'].iloc[0] if not stats_df.empty else None
+    test_name = stats_df['test'].iloc[0] if not stats_df.empty else None
+    
+    # Create box plot for convergence index
+    _box_by_condition_convergence(ax, df, "Convergence Index", p_val, test_name)
+    
+    ax.set_title('Convergence Index\n(Total Input Cells / Starter Cells)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Convergence Index', fontsize=12)
+    ax.grid(True, axis="y", alpha=0.3)
+    
+    fig.tight_layout()
+    if savepath:
+        fig.savefig(savepath, bbox_inches="tight")
+        # Also save as SVG
+        svg_path = savepath.replace('.png', '.svg')
+        fig.savefig(svg_path, bbox_inches="tight")
+    plt.close(fig)
+
+def _box_by_condition_convergence(ax, sub: pd.DataFrame, title: str, p_value: float = None, test_name: str = None):
+    """Box plot helper for convergence index data."""
+    conds = list(sub["Injection Scheme"].astype(str).unique())
+    conds.sort()
+    data = [sub.loc[sub["Injection Scheme"] == c, "Convergence_Index"].dropna().values for c in conds]
+    
+    # Create box plot
+    bp = ax.boxplot(data, labels=conds, patch_artist=False, showfliers=False)
+    
+    # Add individual points with animal labels
+    for i, cond in enumerate(conds):
+        cond_data = sub.loc[sub["Injection Scheme"] == cond, ["Convergence_Index", "Animal ID"]].dropna()
+        if not cond_data.empty:
+            # Add jitter to x-coordinates to spread points (fixed seed for reproducibility)
+            np.random.seed(42 + i)  # Different seed for each condition
+            x_pos = np.random.normal(i+1, 0.1, len(cond_data))
+            ax.scatter(x_pos, cond_data["Convergence_Index"], alpha=0.7, s=60, edgecolors='black', linewidth=0.5)
+            
+            # Add animal ID labels
+            for j, (_, row) in enumerate(cond_data.iterrows()):
+                ax.annotate(row["Animal ID"], 
+                           (x_pos[j], row["Convergence_Index"]),
+                           xytext=(0, 5), textcoords='offset points',
+                           fontsize=8, ha='center', va='bottom')
+    
+    # Add statistical comparison if p-value provided
+    if p_value is not None and len(conds) == 2:
+        # Calculate y position for comparison line
+        y_max = max([max(d) if len(d) > 0 else 0 for d in data])
+        y_min = min([min(d) if len(d) > 0 else 0 for d in data])
+        y_range = y_max - y_min
+        line_y = y_max + 0.05 * y_range  # Reduced spacing
+        
+        # Draw comparison line
+        ax.plot([1, 2], [line_y, line_y], 'k-', linewidth=1)
+        
+        # Add p-value annotation
+        p_text = f"p = {p_value:.3f}" if p_value >= 0.001 else "p < 0.001"
+        if test_name:
+            p_text += f" ({test_name})"
+        
+        ax.text(1.5, line_y + 0.02 * y_range, p_text, 
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.grid(True, axis="y", alpha=0.3)
+
+# -----------------
 # Main analysis API
 # -----------------
 
@@ -1917,6 +2112,9 @@ def analyze(csv_path: str = "data/rabies_comparison.csv",
     # Compute John's proportion calculations
     df_john_prop_all = compute_john_proportions(df_orig, proportion_type='all_non_starter')
     df_john_prop_local = compute_john_proportions(df_orig, proportion_type='local_vs_long_distance')
+    
+    # Compute convergence index
+    df_convergence = compute_convergence_index(df_orig)
     
     # Raw data (no normalization) - use the original long-format data
     df_raw = df_long.copy()
@@ -1947,6 +2145,9 @@ def analyze(csv_path: str = "data/rabies_comparison.csv",
     stats_layer_prop = run_per_stratum_tests(df_local_prop, conds, "Layer", "Proportion") if not df_local_prop.empty else pd.DataFrame()
     stats_region_raw = run_per_stratum_tests(df_long_raw, conds, "Region", "Cells") if not df_long_raw.empty else pd.DataFrame()
     stats_layer_raw = run_per_stratum_tests(df_local_raw, conds, "Layer", "Cells") if not df_local_raw.empty else pd.DataFrame()
+    
+    # Run statistical tests for convergence index
+    stats_convergence = run_convergence_tests(df_convergence, conds) if not df_convergence.empty else pd.DataFrame()
 
     # Sanity check: Force all Mann-Whitney U tests
     stats_region_norm_mw = run_per_stratum_tests_forced_mw(df_long_norm, conds, "Region", "Norm") if not df_long_norm.empty else pd.DataFrame()
@@ -2007,6 +2208,12 @@ def analyze(csv_path: str = "data/rabies_comparison.csv",
     stats_all_ratio_st.to_csv(stats_csv_ratio_st, index=False)
     stats_all_prop_st.to_csv(stats_csv_prop_st, index=False)
     stats_all_raw_st.to_csv(stats_csv_raw_st, index=False)
+    
+    # Save convergence index statistics and data
+    stats_csv_convergence = f"{out_prefix}_convergence_indices.csv"
+    convergence_csv = f"convergence_indices.csv"
+    stats_convergence.to_csv(stats_csv_convergence, index=False)
+    df_convergence.to_csv(convergence_csv, index=False)
 
     # Generate plots
     fig_regions_norm = f"{out_prefix}_regions_normalized.png"
@@ -2122,6 +2329,11 @@ def analyze(csv_path: str = "data/rabies_comparison.csv",
     plot_john_proportions_bar_chart(df_orig, proportion_type='local_vs_long_distance', savepath=fig_john_prop_local)
     plot_john_regional_inputs_bar_chart(df_orig, normalize_by_area=False, savepath=fig_john_regional)
     plot_john_regional_inputs_bar_chart(df_orig, normalize_by_area=True, savepath=fig_john_regional_area)
+    
+    # Convergence index plot
+    print("Generating convergence index plot...")
+    fig_convergence = "convergence_indices.png"
+    plot_convergence_index(df_convergence, stats_convergence, fig_convergence)
     
     # Create power analysis summary Excel file
     print("Creating power analysis summary...")
@@ -2265,6 +2477,10 @@ def analyze(csv_path: str = "data/rabies_comparison.csv",
         "fig_john_proportion_regional_area_normalized": fig_john_regional_area,
         # Power analysis summary
         "power_analysis_summary": power_summary_file,
+        # Convergence index files
+        "convergence_indices_csv": convergence_csv,
+        "convergence_indices_stats": stats_csv_convergence,
+        "convergence_indices_plot": fig_convergence,
     }
 
 if __name__ == "__main__":
