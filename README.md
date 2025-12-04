@@ -2,6 +2,8 @@
 
 Comprehensive statistical analysis script for rabies tracing data comparison between injection schemes with advanced stratified analytics and convergence index calculations.
 
+[![Lines of Code](https://img.shields.io/endpoint?url=https%3A%2F%2Ftokei.kojix2.net%2Fbadge%2Fgithub%2Fmatsojr22%2Frabies_seq-v-co_analysis%2Flines)](https://tokei.kojix2.net/github/matsojr22/rabies_seq-v-co_analysis)
+
 ## Features
 
 ### Core Analysis
