@@ -5629,6 +5629,295 @@ statistical control of confounding variables in neuroscience research.
     
     return text
 
+def analyze_layer_preference_within_groups(df_orig: pd.DataFrame, savepath_prefix: str = "layer_preference_analysis"):
+    """
+    Analyze layer preference (L4 vs other layers) within each injection scheme group.
+    Calculates %total for each layer and compares L4 against other layers within coinjected and separated groups separately.
+    
+    Args:
+        df_orig: Original wide-format dataframe
+        savepath_prefix: Prefix for output files
+        
+    Returns:
+        Dictionary with analysis results and file paths
+    """
+    import os
+    from scipy.stats import shapiro, ttest_rel, wilcoxon, levene
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    
+    # Create results dictionary
+    results = {
+        'analysis_summary': {},
+        'statistical_tests': {},
+        'plots': {},
+        'summary_files': {}
+    }
+    
+    # Create output directory
+    os.makedirs(savepath_prefix, exist_ok=True)
+    
+    # Calculate total for each animal (sum of all V1 layers)
+    df_analysis = df_orig.copy()
+    df_analysis['V1_Total'] = (df_analysis['V1 L2/3'] + df_analysis['V1 L4'] + 
+                               df_analysis['V1 L5'] + df_analysis['V1 L6a'] + df_analysis['V1 L6b'])
+    
+    # Calculate percent total for each layer
+    df_analysis['L2_3_Percent'] = (df_analysis['V1 L2/3'] / df_analysis['V1_Total']) * 100
+    df_analysis['L4_Percent'] = (df_analysis['V1 L4'] / df_analysis['V1_Total']) * 100
+    df_analysis['L5_Percent'] = (df_analysis['V1 L5'] / df_analysis['V1_Total']) * 100
+    df_analysis['L6a_Percent'] = (df_analysis['V1 L6a'] / df_analysis['V1_Total']) * 100
+    df_analysis['L6b_Percent'] = (df_analysis['V1 L6b'] / df_analysis['V1_Total']) * 100
+    
+    # Define all layers for pairwise comparisons
+    all_layers = ['L2_3', 'L4', 'L5', 'L6a', 'L6b']
+    
+    # Generate all pairwise combinations (10 total)
+    from itertools import combinations
+    pairwise_comparisons = list(combinations(all_layers, 2))
+    
+    # Analyze each injection scheme group
+    statistical_results = {}
+    
+    for injection_scheme in df_analysis['Injection Scheme'].unique():
+        scheme_data = df_analysis[df_analysis['Injection Scheme'] == injection_scheme].copy()
+        
+        scheme_results = {}
+        
+        # Compare each pair of layers
+        for layer1, layer2 in pairwise_comparisons:
+            layer1_values = scheme_data[f'{layer1}_Percent'].values
+            layer2_values = scheme_data[f'{layer2}_Percent'].values
+            
+            # Calculate differences
+            differences = layer1_values - layer2_values
+            
+            # Descriptive statistics
+            layer1_mean = layer1_values.mean()
+            layer1_std = layer1_values.std()
+            layer2_mean = layer2_values.mean()
+            layer2_std = layer2_values.std()
+            diff_mean = differences.mean()
+            diff_std = differences.std()
+            
+            # Test normality of differences
+            if len(differences) >= 3:  # Need at least 3 for Shapiro-Wilk
+                normality_stat, normality_p = shapiro(differences)
+            else:
+                normality_p = 0.05  # Conservative assumption: assume non-normal for small n
+            
+            # Choose appropriate test
+            if normality_p > 0.05:
+                # Use paired t-test
+                t_stat, p_val = ttest_rel(layer1_values, layer2_values)
+                test_name = "Paired t-test"
+                test_stat = t_stat
+            else:
+                # Use Wilcoxon signed-rank test
+                stat, p_val = wilcoxon(differences, alternative='two-sided')
+                test_name = "Wilcoxon signed-rank test"
+                test_stat = stat
+            
+            # Calculate effect size (Cohen's d for paired samples)
+            pooled_std_diff = diff_std / np.sqrt(1 - np.corrcoef(layer1_values, layer2_values)[0,1]**2) if len(layer1_values) > 1 else diff_std
+            cohens_d = diff_mean / pooled_std_diff if pooled_std_diff > 0 else 0
+            
+            # Calculate mean difference 95% CI
+            if len(differences) > 1:
+                sem = diff_std / np.sqrt(len(differences))
+                ci_lower = diff_mean - 1.96 * sem
+                ci_upper = diff_mean + 1.96 * sem
+            else:
+                ci_lower = np.nan
+                ci_upper = np.nan
+            
+            comparison_key = f'{layer1}_vs_{layer2}'
+            scheme_results[comparison_key] = {
+                'comparison': f'{layer1} vs {layer2}',
+                'layer1': layer1,
+                'layer2': layer2,
+                'injection_scheme': injection_scheme,
+                'n': len(scheme_data),
+                f'{layer1}_mean': layer1_mean,
+                f'{layer1}_std': layer1_std,
+                f'{layer2}_mean': layer2_mean,
+                f'{layer2}_std': layer2_std,
+                'mean_difference': diff_mean,
+                'difference_std': diff_std,
+                'difference_95CI_lower': ci_lower,
+                'difference_95CI_upper': ci_upper,
+                'test_name': test_name,
+                'test_statistic': test_stat,
+                'p_value': p_val,
+                'cohens_d': cohens_d,
+                'normality_p': normality_p,
+                'significant': p_val < 0.05
+            }
+        
+        statistical_results[injection_scheme] = scheme_results
+    
+    # Create comprehensive box plots for all pairwise comparisons
+    n_comparisons = len(pairwise_comparisons)
+    n_rows = int(np.ceil(np.sqrt(n_comparisons)))
+    n_cols = int(np.ceil(n_comparisons / n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols*6, n_rows*4), dpi=PLOT_DPI)
+    if n_comparisons == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    
+    plot_idx = 0
+    for layer1, layer2 in pairwise_comparisons:
+        if plot_idx < len(axes):
+            ax = axes[plot_idx]
+            
+            # Prepare data for each injection scheme
+            data_to_plot = []
+            labels = []
+            
+            for scheme_idx, injection_scheme in enumerate(df_analysis['Injection Scheme'].unique()):
+                scheme_data = df_analysis[df_analysis['Injection Scheme'] == injection_scheme]
+                layer1_values = scheme_data[f'{layer1}_Percent'].values
+                layer2_values = scheme_data[f'{layer2}_Percent'].values
+                
+                # Add layer1 values
+                data_to_plot.append(layer1_values)
+                labels.append(f'{injection_scheme.capitalize()}\n{layer1}')
+                
+                # Add layer2 values
+                data_to_plot.append(layer2_values)
+                labels.append(f'{injection_scheme.capitalize()}\n{layer2}')
+            
+            # Create box plots
+            bp = ax.boxplot(data_to_plot, labels=labels, patch_artist=True, showfliers=True)
+            
+            # Color the boxes with different shades for each injection scheme
+            colors = ['#ff7f0e', '#ffbb87', '#1f77b4', '#63b8d4']
+            if len(data_to_plot) > len(colors):
+                colors = colors * (len(data_to_plot) // len(colors) + 1)
+            
+            for patch, color in zip(bp['boxes'], colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+            
+            # Add individual points
+            for i, values in enumerate(data_to_plot):
+                x_pos = np.random.normal(i+1, 0.1, len(values))
+                ax.scatter(x_pos, values, color='black', alpha=0.6, s=30, edgecolors='white', linewidth=0.5)
+            
+            # Add statistical annotations from the results
+            y_max = max([max(v) if len(v) > 0 else 0 for v in data_to_plot])
+            y_min = min([min(v) if len(v) > 0 else 0 for v in data_to_plot])
+            y_range = y_max - y_min
+            
+            # Add annotations for both groups
+            annotation_y = y_max + 0.15 * y_range
+            line_y = y_max + 0.08 * y_range
+            
+            for scheme_idx, injection_scheme in enumerate(df_analysis['Injection Scheme'].unique()):
+                comparison_key = f'{layer1}_vs_{layer2}'
+                if injection_scheme in statistical_results and comparison_key in statistical_results[injection_scheme]:
+                    result = statistical_results[injection_scheme][comparison_key]
+                    p_val = result['p_value']
+                    
+                    if p_val < 0.001:
+                        p_text = "***"
+                    elif p_val < 0.01:
+                        p_text = "**"
+                    elif p_val < 0.05:
+                        p_text = "*"
+                    else:
+                        p_text = f"p={p_val:.3f}"
+                    
+                    # Position for this group (2 boxes per group, grouped together)
+                    box_pos = scheme_idx * 2 + 1.5
+                    
+                    # Draw line
+                    ax.plot([box_pos - 0.5, box_pos + 0.5], [line_y, line_y], 'k-', linewidth=1)
+                    
+                    # Add text
+                    ax.text(box_pos, annotation_y, p_text, ha='center', va='bottom', 
+                           fontsize=9, fontweight='bold' if p_val < 0.05 else 'normal')
+            
+            # Set labels and title
+            ax.set_ylabel('% of Total V1 Input', fontsize=10, fontweight='bold')
+            ax.set_title(f'{layer1} vs {layer2}', fontsize=11, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            
+            plot_idx += 1
+    
+    # Hide unused subplots
+    for i in range(plot_idx, len(axes)):
+        axes[i].set_visible(False)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    plot_path = f"{savepath_prefix}/layer_preference_comparisons.png"
+    fig.savefig(plot_path, bbox_inches="tight")
+    svg_path = plot_path.replace('.png', '.svg')
+    fig.savefig(svg_path, bbox_inches="tight")
+    plt.close(fig)
+    
+    # Create summary statistics DataFrame
+    summary_data = []
+    for injection_scheme, scheme_results in statistical_results.items():
+        for comparison_key, result in scheme_results.items():
+            layer1 = result['layer1']
+            layer2 = result['layer2']
+            
+            # Get the dynamic layer keys for mean and std
+            layer1_mean_key = f'{layer1}_mean'
+            layer1_std_key = f'{layer1}_std'
+            layer2_mean_key = f'{layer2}_mean'
+            layer2_std_key = f'{layer2}_std'
+            
+            summary_data.append({
+                'Injection_Scheme': injection_scheme,
+                'Comparison': result['comparison'],
+                'Layer1': layer1,
+                'Layer2': layer2,
+                'N': result['n'],
+                'Layer1_Mean': result.get(layer1_mean_key, np.nan),
+                'Layer1_Std': result.get(layer1_std_key, np.nan),
+                'Layer2_Mean': result.get(layer2_mean_key, np.nan),
+                'Layer2_Std': result.get(layer2_std_key, np.nan),
+                'Mean_Difference': result['mean_difference'],
+                'Difference_Std': result['difference_std'],
+                'Difference_95CI_Lower': result['difference_95CI_lower'],
+                'Difference_95CI_Upper': result['difference_95CI_upper'],
+                'Test_Name': result['test_name'],
+                'Test_Statistic': result['test_statistic'],
+                'P_Value': result['p_value'],
+                'Cohens_D': result['cohens_d'],
+                'Significant': result['significant']
+            })
+    
+    summary_df = pd.DataFrame(summary_data)
+    
+    # Save summary
+    summary_csv_path = f"{savepath_prefix}/layer_preference_summary.csv"
+    summary_df.to_csv(summary_csv_path, index=False)
+    
+    # Store results
+    results['analysis_summary'] = {
+        'total_animals': len(df_analysis),
+        'coinjected_animals': len(df_analysis[df_analysis['Injection Scheme'] == 'coinjected']),
+        'separated_animals': len(df_analysis[df_analysis['Injection Scheme'] == 'separated']),
+        'comparisons_made': len(pairwise_comparisons) * len(df_analysis['Injection Scheme'].unique())
+    }
+    
+    results['statistical_tests'] = statistical_results
+    results['plots'] = {
+        'comparisons_plot': plot_path
+    }
+    results['summary_files'] = {
+        'summary_statistics': summary_csv_path
+    }
+    
+    return results
+
 # -----------------
 # Main analysis API
 # -----------------
@@ -5948,6 +6237,10 @@ def analyze(csv_path: str = "data/rabies_comparison.csv",
     print("Performing stratified analytics...")
     stratified_results = perform_stratified_analytics(df_orig, "stratified_analytics")
     
+    # Layer preference within-group analysis
+    print("Performing layer preference within-group analysis...")
+    layer_preference_results = analyze_layer_preference_within_groups(df_orig, "layer_preference_analysis")
+    
     # Create power analysis summary Excel file
     print("Creating power analysis summary...")
     power_summary_file = f"{out_prefix}_power_analysis_summary.xlsx"
@@ -6124,6 +6417,10 @@ def analyze(csv_path: str = "data/rabies_comparison.csv",
         "stratified_density_analysis": stratified_results['stratified_tests']['density_analysis']['plot_path'],
         "stratified_efficiency_analysis": stratified_results['stratified_tests']['efficiency_analysis']['plot_path'],
         "stratified_comprehensive_plot": stratified_results['plots']['comprehensive_plot'],
+        
+        # Layer preference within-group analysis
+        "layer_preference_comparisons_plot": layer_preference_results['plots']['comparisons_plot'],
+        "layer_preference_summary": layer_preference_results['summary_files']['summary_statistics'],
     }
 
 if __name__ == "__main__":
